@@ -26,6 +26,12 @@ Streamlit web conversion of the original Tkinter production report application.
 - Annual machine accepted-production trend analysis
 - Select individual machines to compare in the annual dashboard
 - Highlight the highest accepted-production month and lowest rejection-rate month
+- KPI target settings for accepted production and maximum rejection rate
+- Green / Amber / Red production and quality status
+- Period target, variance-to-target and target-attainment calculations
+- Monthly KPI grading using each month's included weeks
+- Management highlights including top-output machine, best-quality machine and quality-attention machine
+- KPI management-review page included in consolidated PDF reports
 - Downloadable consolidated monthly/annual PDF report
 
 ## Deploy on Streamlit Community Cloud
@@ -33,12 +39,15 @@ Streamlit web conversion of the original Tkinter production report application.
 - Repository: `GaryPalfreman/Production-Report-Generator-Web`
 - Branch: `main`
 - Main file path: `app.py`
+- Live app: `https://pr0duction-report-generator-web.streamlit.app`
 
 ## Higher-level reports
 
 Each weekly JSON file downloaded from the app contains the source data required for aggregation. Open the `Monthly / Annual Reports` tab and upload the saved weekly JSON files. Monthly reports accept a maximum of 5 weekly files and One Year / Overall reports accept a maximum of 52. Duplicate week-start dates are rejected so the same week cannot be counted twice.
 
-The consolidated report includes overall production totals, rejection rate, weekly trends, a week-by-week table, production totals by machine and product, and for annual reports a month-by-month management review plus machine performance trends. The annual PDF includes month-to-month comparison and machine accepted-production trend charts.
+Before building the report, KPI settings can be entered for accepted production per week, maximum rejection rate and the Amber tolerance band. The app then calculates the period target automatically from the number of uploaded weeks and grades production and quality as Green, Amber or Red. Monthly KPI rows show accepted target, variance, target attainment, production status and quality status.
+
+The consolidated report includes overall production totals, rejection rate, weekly trends, KPI status, management highlights, a week-by-week table, production totals by machine and product, and for annual reports a month-by-month management review plus machine performance trends. The PDF includes the KPI management review and relevant trend charts.
 
 ## Data storage
 
