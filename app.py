@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -50,7 +51,7 @@ if "products" not in st.session_state:
     st.session_state.products = []
 
 st.title("Weekly Production Report Generator")
-st.caption("Enter production data by day and machine, review the week, generate a weekly PDF, or combine saved weeks into monthly and annual reports.")
+st.caption("Enter production data by day and machine, review the week, generate a weekly PDF, or combine saved weeks into monthly and annual management reports.")
 
 with st.sidebar:
     st.header("Saved data")
@@ -67,12 +68,7 @@ with st.sidebar:
         except Exception as exc:
             st.error(f"Could not load file: {exc}")
 
-    payload = save_payload(
-        st.session_state.week_start,
-        st.session_state.day_data,
-        st.session_state.machines,
-        st.session_state.products,
-    )
+    payload = save_payload(st.session_state.week_start, st.session_state.day_data, st.session_state.machines, st.session_state.products)
     st.download_button(
         "Download weekly data (JSON)",
         data=payload,
@@ -160,8 +156,7 @@ with entry_tab:
             accepted = int(completed_quantity) - int(rejected_quantity)
             st.metric("Accepted Quantity", accepted)
 
-        save = st.form_submit_button("Save Data for This Machine", use_container_width=True)
-        if save:
+        if st.form_submit_button("Save Data for This Machine", use_container_width=True):
             machine = machine_custom.strip() if machine_choice == "<Enter new machine>" else machine_choice
             product = product_custom.strip() if product_choice == "<Enter new product>" else product_choice
             if not machine or not product or not manufacturing_order.strip() or not operation_number.strip():
@@ -191,8 +186,7 @@ with entry_tab:
     if existing:
         rows = []
         for machine, raw in existing.items():
-            item = normalise_machine_data(raw)
-            rows.append({"Machine": machine, **item})
+            rows.append({"Machine": machine, **normalise_machine_data(raw)})
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 with review_tab:
@@ -204,13 +198,10 @@ with review_tab:
             st.info(f"{day}: No production data entered / skipped")
             continue
         for machine, raw in machines.items():
-            item = normalise_machine_data(raw)
-            all_rows.append({"Day": day, "Date": st.session_state.day_data[day]["date"], "Machine": machine, **item})
+            all_rows.append({"Day": day, "Date": st.session_state.day_data[day]["date"], "Machine": machine, **normalise_machine_data(raw)})
 
     if all_rows:
-        review_df = pd.DataFrame(all_rows)
-        st.dataframe(review_df, hide_index=True, use_container_width=True)
-
+        st.dataframe(pd.DataFrame(all_rows), hide_index=True, use_container_width=True)
         st.markdown("### Edit an entry")
         labels = [f"{r['Day']} - {r['Machine']} - {r['Manufacturing Order']}" for r in all_rows]
         selected = st.selectbox("Select entry", range(len(labels)), format_func=lambda i: labels[i])
@@ -260,11 +251,10 @@ with report_tab:
         try:
             pdf_bytes = generate_pdf(st.session_state.week_start, st.session_state.day_data)
             end_date = dates["Saturday"]
-            filename = f"Production_Report_{st.session_state.week_start.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.pdf"
             st.download_button(
                 "Generate / Download Weekly Production Report PDF",
                 data=pdf_bytes,
-                file_name=filename,
+                file_name=f"Production_Report_{st.session_state.week_start.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
@@ -274,10 +264,7 @@ with report_tab:
 
 with history_tab:
     st.subheader("Build a Monthly or One-Year Report")
-    st.write(
-        "Upload the weekly JSON files previously downloaded from this app. "
-        "The files are combined into one higher-level production report without changing the original weekly files."
-    )
+    st.write("Upload weekly JSON files previously downloaded from this app. They are combined without altering the original weekly files.")
 
     report_type = st.radio(
         "Report type",
@@ -299,8 +286,7 @@ with history_tab:
         if len(uploaded_weeks) > max_files:
             st.error(f"Too many files selected. {report_type} reports accept a maximum of {max_files} weekly JSON files.")
         else:
-            reports = []
-            errors = []
+            reports, errors = [], []
             for uploaded_week in uploaded_weeks:
                 try:
                     reports.append(load_weekly_report(uploaded_week.getvalue(), uploaded_week.name))
@@ -325,35 +311,52 @@ with history_tab:
                     a5.metric("Rejection Rate", f"{aggregate['Rejection Rate']:.2f}%")
 
                     st.markdown("### Week-by-week summary")
-                    weekly_df = pd.DataFrame(aggregate["weekly_rows"])
-                    st.dataframe(weekly_df, hide_index=True, use_container_width=True)
+                    st.dataframe(pd.DataFrame(aggregate["weekly_rows"]), hide_index=True, use_container_width=True)
+
+                    if report_type == "One Year / Overall":
+                        st.markdown("## Annual Management Review")
+                        st.markdown("### Month-to-month comparison")
+                        monthly_df = pd.DataFrame(aggregate["monthly_rows"])
+                        st.dataframe(monthly_df.drop(columns=["Month Key"], errors="ignore"), hide_index=True, use_container_width=True)
+
+                        if not monthly_df.empty:
+                            chart_df = monthly_df.set_index("Month")[["Completed", "Accepted", "Rejected"]]
+                            st.line_chart(chart_df, use_container_width=True)
+
+                            best = monthly_df.loc[monthly_df["Accepted"].idxmax()]
+                            lowest_reject = monthly_df.loc[monthly_df["Rejection Rate %"].idxmin()]
+                            c1, c2 = st.columns(2)
+                            c1.metric("Highest Accepted Month", best["Month"], f"{int(best['Accepted']):,} accepted")
+                            c2.metric("Lowest Rejection Month", lowest_reject["Month"], f"{lowest_reject['Rejection Rate %']:.2f}%")
+
+                        st.markdown("### Machine performance trends")
+                        machine_trends = pd.DataFrame(aggregate["machine_trend_rows"])
+                        if machine_trends.empty:
+                            st.info("No machine trend data found.")
+                        else:
+                            machine_names = sorted(machine_trends["Machine"].unique(), key=str.lower)
+                            selected_machines = st.multiselect("Machines to compare", machine_names, default=machine_names[: min(5, len(machine_names))])
+                            filtered = machine_trends[machine_trends["Machine"].isin(selected_machines)]
+                            if not filtered.empty:
+                                pivot = filtered.pivot_table(index="Month", columns="Machine", values="Accepted", aggfunc="sum", fill_value=0)
+                                st.line_chart(pivot, use_container_width=True)
+                            st.dataframe(machine_trends.drop(columns=["Month Key"], errors="ignore"), hide_index=True, use_container_width=True)
 
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown("### Production by machine")
                         machine_df = pd.DataFrame(aggregate["machine_rows"])
-                        if machine_df.empty:
-                            st.info("No machine data found in the selected reports.")
-                        else:
-                            st.dataframe(machine_df, hide_index=True, use_container_width=True)
+                        st.dataframe(machine_df, hide_index=True, use_container_width=True) if not machine_df.empty else st.info("No machine data found.")
                     with c2:
                         st.markdown("### Production by product")
                         product_df = pd.DataFrame(aggregate["product_rows"])
-                        if product_df.empty:
-                            st.info("No product data found in the selected reports.")
-                        else:
-                            st.dataframe(product_df, hide_index=True, use_container_width=True)
+                        st.dataframe(product_df, hide_index=True, use_container_width=True) if not product_df.empty else st.info("No product data found.")
 
                     pdf_bytes = generate_period_pdf(aggregate, period_label)
-                    filename = (
-                        f"{period_label}_Production_Report_"
-                        f"{aggregate['start_date'].strftime('%d%m%Y')}_to_"
-                        f"{aggregate['end_date'].strftime('%d%m%Y')}.pdf"
-                    )
                     st.download_button(
                         f"Generate / Download {report_type} Production Report PDF",
                         data=pdf_bytes,
-                        file_name=filename,
+                        file_name=f"{period_label}_Production_Report_{aggregate['start_date'].strftime('%d%m%Y')}_to_{aggregate['end_date'].strftime('%d%m%Y')}.pdf",
                         mime="application/pdf",
                         use_container_width=True,
                     )
@@ -363,7 +366,4 @@ with history_tab:
         st.info(f"Upload between 1 and {max_files} saved weekly JSON files to create this report.")
 
 st.divider()
-st.caption(
-    "Weekly data is kept in the current browser session. Download the weekly JSON file to retain each week; "
-    "those saved files can later be combined into monthly and one-year reports."
-)
+st.caption("Weekly data is kept in the current browser session. Download the JSON file to retain or transfer a week, then use those files later for monthly and annual reporting.")
