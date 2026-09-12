@@ -15,6 +15,9 @@ Streamlit web conversion of the original Tkinter production report application.
 - Weekly summary chart generated from real production data
 - Daily machine production charts and daily detail tables
 - Download/reload weekly JSON data for transfer between sessions or devices
+- Local Weekly Backup page for creating one ZIP containing the weekly JSON and PDF
+- Backup ZIP automatically uses a `Production Reports / Year / Month / Week` folder structure when extracted
+- Backup ZIP includes archive information and SHA-256 integrity checksums
 - Build a Monthly Production Report from up to 5 saved weekly JSON files
 - Build a One Year / Overall Production Report from up to 52 saved weekly JSON files
 - Detect duplicate weeks before aggregation
@@ -41,6 +44,23 @@ Streamlit web conversion of the original Tkinter production report application.
 - Main file path: `app.py`
 - Live app: `https://pr0duction-report-generator-web.streamlit.app`
 
+## Local weekly backup
+
+The `Local Weekly Backup` page creates a single downloadable ZIP for the selected week. It can use either the current week already open in the browser session or a previously downloaded weekly JSON file.
+
+The ZIP contains:
+
+- the editable weekly JSON source data
+- the finished weekly PDF report
+- `ARCHIVE_INFO.txt` describing the reporting period and archive contents
+- `MANIFEST_SHA256.txt` containing integrity checksums for the JSON and PDF
+
+The ZIP stores these files under a folder structure such as:
+
+`Production Reports/2026/09 September/Week 2026-09-07/`
+
+When the ZIP is extracted locally, that folder structure is created automatically. This provides a simple local archive without requiring online persistent storage.
+
 ## Higher-level reports
 
 Each weekly JSON file downloaded from the app contains the source data required for aggregation. Open the `Monthly / Annual Reports` tab and upload the saved weekly JSON files. Monthly reports accept a maximum of 5 weekly files and One Year / Overall reports accept a maximum of 52. Duplicate week-start dates are rejected so the same week cannot be counted twice.
@@ -49,6 +69,8 @@ Before building the report, KPI settings can be entered for accepted production 
 
 The consolidated report includes overall production totals, rejection rate, weekly trends, KPI status, management highlights, a week-by-week table, production totals by machine and product, and for annual reports a month-by-month management review plus machine performance trends. The PDF includes the KPI management review and relevant trend charts.
 
-## Data storage
+## Data storage and privacy
 
-The original desktop application wrote files into a local `Production_Work` directory. The web version keeps the current week in the Streamlit browser session and provides a JSON download/load workflow rather than relying on server-local files. Saved weekly JSON files act as the long-term source records for monthly and annual report generation.
+The original desktop application wrote files into a local `Production_Work` directory. The web version intentionally avoids a persistent cloud database. Current working data exists in the Streamlit browser session while the app is in use, and long-term records are retained through files downloaded to the user's computer.
+
+Saved weekly JSON files act as the source records for monthly and annual report generation. The Local Weekly Backup ZIP is the recommended archive format because it keeps the editable JSON and final PDF together in one locally stored package.
