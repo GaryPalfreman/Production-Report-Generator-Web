@@ -1,6 +1,5 @@
 from datetime import date, timedelta
 
-import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -8,6 +7,7 @@ from report_generator import (
     DAYS,
     aggregate_weekly_reports,
     blank_week,
+    evaluate_kpis,
     generate_pdf,
     generate_period_pdf,
     load_payload,
@@ -39,6 +39,10 @@ def most_recent_monday() -> date:
 def reset_week(monday: date):
     st.session_state.week_start = monday
     st.session_state.day_data = blank_week(monday)
+
+
+def status_icon(status: str) -> str:
+    return {"Green": "🟢", "Amber": "🟠", "Red": "🔴", "Not Set": "⚪"}.get(status, "⚪")
 
 
 if "week_start" not in st.session_state:
@@ -184,9 +188,7 @@ with entry_tab:
 
     existing = st.session_state.day_data[day]["machines"]
     if existing:
-        rows = []
-        for machine, raw in existing.items():
-            rows.append({"Machine": machine, **normalise_machine_data(raw)})
+        rows = [{"Machine": machine, **normalise_machine_data(raw)} for machine, raw in existing.items()]
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 with review_tab:
@@ -275,6 +277,30 @@ with history_tab:
     max_files = 5 if report_type == "Monthly" else 52
     period_label = "Monthly" if report_type == "Monthly" else "Annual"
 
+    with st.expander("KPI / Target Settings", expanded=True):
+        k1, k2, k3 = st.columns(3)
+        weekly_accepted_target = k1.number_input(
+            "Accepted production target per week",
+            min_value=0,
+            value=0,
+            step=1,
+            help="Set to 0 if you do not want to grade production against a target.",
+        )
+        max_rejection_rate = k2.number_input(
+            "Maximum rejection rate (%)",
+            min_value=0.0,
+            value=2.0,
+            step=0.1,
+            format="%.2f",
+        )
+        amber_tolerance = k3.number_input(
+            "Amber tolerance (%)",
+            min_value=0.0,
+            value=10.0,
+            step=1.0,
+            help="Production within this percentage below target, or rejection within this percentage above target, is graded Amber instead of Red.",
+        )
+
     uploaded_weeks = st.file_uploader(
         f"Upload weekly JSON files (maximum {max_files})",
         type=["json"],
@@ -298,6 +324,13 @@ with history_tab:
             elif reports:
                 try:
                     aggregate = aggregate_weekly_reports(reports)
+                    kpis = evaluate_kpis(
+                        aggregate,
+                        weekly_accepted_target=int(weekly_accepted_target),
+                        max_rejection_rate=float(max_rejection_rate),
+                        amber_tolerance_pct=float(amber_tolerance),
+                    )
+
                     st.success(
                         f"Loaded {aggregate['weeks_included']} unique weekly report(s), covering "
                         f"{aggregate['start_date'].strftime('%d/%m/%Y')} to {aggregate['end_date'].strftime('%d/%m/%Y')}."
@@ -310,18 +343,48 @@ with history_tab:
                     a4.metric("Accepted", f"{aggregate['Accepted Total']:,}")
                     a5.metric("Rejection Rate", f"{aggregate['Rejection Rate']:.2f}%")
 
+                    st.markdown("## KPI Dashboard")
+                    p1, p2, p3, p4 = st.columns(4)
+                    target_display = f"{kpis['Period Accepted Target']:,}" if kpis["Period Accepted Target"] else "Not Set"
+                    p1.metric("Accepted Target", target_display)
+                    p2.metric(
+                        f"{status_icon(kpis['Production Status'])} Production Status",
+                        kpis["Production Status"],
+                        f"{kpis['Production Variance']:+,} vs target" if kpis["Period Accepted Target"] else None,
+                    )
+                    p3.metric("Maximum Rejection Rate", f"{kpis['Max Rejection Rate %']:.2f}%")
+                    p4.metric(
+                        f"{status_icon(kpis['Quality Status'])} Quality Status",
+                        kpis["Quality Status"],
+                        f"{kpis['Rejection Actual %']:.2f}% actual",
+                    )
+
+                    st.markdown("### Management highlights")
+                    for highlight in kpis["highlights"]:
+                        st.write(f"• {highlight}")
+
                     st.markdown("### Week-by-week summary")
                     st.dataframe(pd.DataFrame(aggregate["weekly_rows"]), hide_index=True, use_container_width=True)
 
+                    monthly_kpi_df = pd.DataFrame(kpis["monthly_kpis"])
+                    if not monthly_kpi_df.empty:
+                        st.markdown("### Monthly KPI performance")
+                        display_cols = [
+                            "Month", "Weeks Included", "Accepted", "Accepted Target", "Variance to Target",
+                            "Target Attainment %", "Production Status", "Rejection Rate %", "Quality Status"
+                        ]
+                        st.dataframe(monthly_kpi_df[display_cols], hide_index=True, use_container_width=True)
+                        if weekly_accepted_target > 0:
+                            target_chart = monthly_kpi_df.set_index("Month")[["Accepted", "Accepted Target"]]
+                            st.line_chart(target_chart, use_container_width=True)
+
                     if report_type == "One Year / Overall":
                         st.markdown("## Annual Management Review")
-                        st.markdown("### Month-to-month comparison")
                         monthly_df = pd.DataFrame(aggregate["monthly_rows"])
-                        st.dataframe(monthly_df.drop(columns=["Month Key"], errors="ignore"), hide_index=True, use_container_width=True)
-
                         if not monthly_df.empty:
-                            chart_df = monthly_df.set_index("Month")[["Completed", "Accepted", "Rejected"]]
-                            st.line_chart(chart_df, use_container_width=True)
+                            st.markdown("### Month-to-month comparison")
+                            st.dataframe(monthly_df.drop(columns=["Month Key"], errors="ignore"), hide_index=True, use_container_width=True)
+                            st.line_chart(monthly_df.set_index("Month")[["Completed", "Accepted", "Rejected"]], use_container_width=True)
 
                             best = monthly_df.loc[monthly_df["Accepted"].idxmax()]
                             lowest_reject = monthly_df.loc[monthly_df["Rejection Rate %"].idxmin()]
@@ -346,13 +409,19 @@ with history_tab:
                     with c1:
                         st.markdown("### Production by machine")
                         machine_df = pd.DataFrame(aggregate["machine_rows"])
-                        st.dataframe(machine_df, hide_index=True, use_container_width=True) if not machine_df.empty else st.info("No machine data found.")
+                        if machine_df.empty:
+                            st.info("No machine data found.")
+                        else:
+                            st.dataframe(machine_df, hide_index=True, use_container_width=True)
                     with c2:
                         st.markdown("### Production by product")
                         product_df = pd.DataFrame(aggregate["product_rows"])
-                        st.dataframe(product_df, hide_index=True, use_container_width=True) if not product_df.empty else st.info("No product data found.")
+                        if product_df.empty:
+                            st.info("No product data found.")
+                        else:
+                            st.dataframe(product_df, hide_index=True, use_container_width=True)
 
-                    pdf_bytes = generate_period_pdf(aggregate, period_label)
+                    pdf_bytes = generate_period_pdf(aggregate, period_label, kpis=kpis)
                     st.download_button(
                         f"Generate / Download {report_type} Production Report PDF",
                         data=pdf_bytes,
