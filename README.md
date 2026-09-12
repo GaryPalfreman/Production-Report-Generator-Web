@@ -21,6 +21,11 @@ Streamlit web conversion of the original Tkinter production report application.
 - Combined completed, rejected, accepted and rejection-rate metrics
 - Week-by-week production summary
 - Production totals grouped by machine and by product
+- Annual month-to-month production comparison
+- Annual monthly rejection-rate comparison
+- Annual machine accepted-production trend analysis
+- Select individual machines to compare in the annual dashboard
+- Highlight the highest accepted-production month and lowest rejection-rate month
 - Downloadable consolidated monthly/annual PDF report
 
 ## Deploy on Streamlit Community Cloud
@@ -33,7 +38,7 @@ Streamlit web conversion of the original Tkinter production report application.
 
 Each weekly JSON file downloaded from the app contains the source data required for aggregation. Open the `Monthly / Annual Reports` tab and upload the saved weekly JSON files. Monthly reports accept a maximum of 5 weekly files and One Year / Overall reports accept a maximum of 52. Duplicate week-start dates are rejected so the same week cannot be counted twice.
 
-The consolidated PDF includes overall production totals, rejection rate, a weekly trend chart, a week-by-week table, production totals by machine and production totals by product.
+The consolidated report includes overall production totals, rejection rate, weekly trends, a week-by-week table, production totals by machine and product, and for annual reports a month-by-month management review plus machine performance trends. The annual PDF includes month-to-month comparison and machine accepted-production trend charts.
 
 ## Data storage
 
