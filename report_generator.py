@@ -85,6 +85,14 @@ def load_weekly_report(raw: bytes | str, filename: str = "") -> Dict:
     }
 
 
+def _month_key(day: date) -> str:
+    return day.strftime("%Y-%m")
+
+
+def _month_label(key: str) -> str:
+    return datetime.strptime(key, "%Y-%m").strftime("%b %Y")
+
+
 def aggregate_weekly_reports(reports: List[Dict]) -> Dict:
     if not reports:
         raise ValueError("At least one weekly report is required.")
@@ -97,6 +105,8 @@ def aggregate_weekly_reports(reports: List[Dict]) -> Dict:
     completed = rejected = accepted = 0
     machine_totals = defaultdict(lambda: {"Completed": 0, "Rejected": 0, "Accepted": 0})
     product_totals = defaultdict(lambda: {"Completed": 0, "Rejected": 0, "Accepted": 0})
+    monthly_totals = defaultdict(lambda: {"Completed": 0, "Rejected": 0, "Accepted": 0, "Weeks": set()})
+    machine_monthly = defaultdict(lambda: defaultdict(lambda: {"Completed": 0, "Rejected": 0, "Accepted": 0}))
     weekly_rows = []
 
     for report in sorted_reports:
@@ -113,7 +123,16 @@ def aggregate_weekly_reports(reports: List[Dict]) -> Dict:
         })
 
         for day in DAYS:
-            machines = report["day_data"].get(day, {}).get("machines", {})
+            day_block = report["day_data"].get(day, {})
+            machines = day_block.get("machines", {})
+            raw_date = day_block.get("date")
+            try:
+                production_day = datetime.strptime(raw_date, "%Y-%m-%d").date() if raw_date else report["week_start"]
+            except ValueError:
+                production_day = report["week_start"]
+            month = _month_key(production_day)
+            monthly_totals[month]["Weeks"].add(report["week_start"].isoformat())
+
             for machine, raw in machines.items():
                 item = normalise_machine_data(raw)
                 mt = machine_totals[machine]
@@ -121,20 +140,59 @@ def aggregate_weekly_reports(reports: List[Dict]) -> Dict:
                 mt["Rejected"] += item["Rejected Quantity"]
                 mt["Accepted"] += item["Accepted Quantity"]
 
-                product = item["Product Name"] or "Unspecified"
-                pt = product_totals[product]
+                pt = product_totals[item["Product Name"] or "Unspecified"]
                 pt["Completed"] += item["Completed Quantity"]
                 pt["Rejected"] += item["Rejected Quantity"]
                 pt["Accepted"] += item["Accepted Quantity"]
 
-    machine_rows = [
-        {"Machine": name, **values}
-        for name, values in sorted(machine_totals.items(), key=lambda x: x[0].lower())
-    ]
-    product_rows = [
-        {"Product": name, **values}
-        for name, values in sorted(product_totals.items(), key=lambda x: x[0].lower())
-    ]
+                mon = monthly_totals[month]
+                mon["Completed"] += item["Completed Quantity"]
+                mon["Rejected"] += item["Rejected Quantity"]
+                mon["Accepted"] += item["Accepted Quantity"]
+
+                mm = machine_monthly[machine][month]
+                mm["Completed"] += item["Completed Quantity"]
+                mm["Rejected"] += item["Rejected Quantity"]
+                mm["Accepted"] += item["Accepted Quantity"]
+
+    machine_rows = []
+    for name, values in sorted(machine_totals.items(), key=lambda x: x[0].lower()):
+        rate = values["Rejected"] / values["Completed"] * 100 if values["Completed"] else 0.0
+        machine_rows.append({"Machine": name, **values, "Rejection Rate %": rate})
+
+    product_rows = []
+    for name, values in sorted(product_totals.items(), key=lambda x: x[0].lower()):
+        rate = values["Rejected"] / values["Completed"] * 100 if values["Completed"] else 0.0
+        product_rows.append({"Product": name, **values, "Rejection Rate %": rate})
+
+    monthly_rows = []
+    for month, values in sorted(monthly_totals.items()):
+        rate = values["Rejected"] / values["Completed"] * 100 if values["Completed"] else 0.0
+        monthly_rows.append({
+            "Month Key": month,
+            "Month": _month_label(month),
+            "Weeks Included": len(values["Weeks"]),
+            "Completed": values["Completed"],
+            "Rejected": values["Rejected"],
+            "Accepted": values["Accepted"],
+            "Rejection Rate %": rate,
+        })
+
+    machine_trend_rows = []
+    months = [row["Month Key"] for row in monthly_rows]
+    for machine in sorted(machine_monthly, key=str.lower):
+        for month in months:
+            values = machine_monthly[machine].get(month, {"Completed": 0, "Rejected": 0, "Accepted": 0})
+            rate = values["Rejected"] / values["Completed"] * 100 if values["Completed"] else 0.0
+            machine_trend_rows.append({
+                "Machine": machine,
+                "Month Key": month,
+                "Month": _month_label(month),
+                "Completed": values["Completed"],
+                "Rejected": values["Rejected"],
+                "Accepted": values["Accepted"],
+                "Rejection Rate %": rate,
+            })
 
     rejection_rate = (rejected / completed * 100) if completed else 0.0
     return {
@@ -149,6 +207,8 @@ def aggregate_weekly_reports(reports: List[Dict]) -> Dict:
         "weekly_rows": weekly_rows,
         "machine_rows": machine_rows,
         "product_rows": product_rows,
+        "monthly_rows": monthly_rows,
+        "machine_trend_rows": machine_trend_rows,
     }
 
 
@@ -170,9 +230,12 @@ def _chart_bytes(labels: List[str], values: List[int], title: str, ylabel: str) 
 
 
 def _summary_chart(summary: Dict[str, int]) -> BytesIO:
-    labels = ["Completed", "Rejected", "Accepted"]
-    values = [summary["Completed Total"], summary["Rejected Total"], summary["Accepted Total"]]
-    return _chart_bytes(labels, values, "Weekly Production Summary", "Quantity")
+    return _chart_bytes(
+        ["Completed", "Rejected", "Accepted"],
+        [summary["Completed Total"], summary["Rejected Total"], summary["Accepted Total"]],
+        "Weekly Production Summary",
+        "Quantity",
+    )
 
 
 def _daily_chart(machines: Dict[str, Dict]) -> BytesIO:
@@ -183,19 +246,58 @@ def _daily_chart(machines: Dict[str, Dict]) -> BytesIO:
 
 def _weekly_trend_chart(aggregate: Dict) -> BytesIO:
     labels = [datetime.strptime(r["Week Starting"], "%Y-%m-%d").strftime("%d/%m") for r in aggregate["weekly_rows"]]
-    completed = [r["Completed"] for r in aggregate["weekly_rows"]]
-    accepted = [r["Accepted"] for r in aggregate["weekly_rows"]]
-    rejected = [r["Rejected"] for r in aggregate["weekly_rows"]]
-
     fig, ax = plt.subplots(figsize=(11, 5.2))
-    ax.plot(labels, completed, marker="o", label="Completed")
-    ax.plot(labels, accepted, marker="o", label="Accepted")
-    ax.plot(labels, rejected, marker="o", label="Rejected")
+    ax.plot(labels, [r["Completed"] for r in aggregate["weekly_rows"]], marker="o", label="Completed")
+    ax.plot(labels, [r["Accepted"] for r in aggregate["weekly_rows"]], marker="o", label="Accepted")
+    ax.plot(labels, [r["Rejected"] for r in aggregate["weekly_rows"]], marker="o", label="Rejected")
     ax.set_title("Weekly Production Trend")
     ax.set_xlabel("Week Starting")
     ax.set_ylabel("Quantity")
     ax.tick_params(axis="x", rotation=45)
     ax.legend()
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=160)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _monthly_comparison_chart(aggregate: Dict) -> BytesIO:
+    rows = aggregate.get("monthly_rows", [])
+    labels = [r["Month"] for r in rows]
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    ax.plot(labels, [r["Completed"] for r in rows], marker="o", label="Completed")
+    ax.plot(labels, [r["Accepted"] for r in rows], marker="o", label="Accepted")
+    ax.plot(labels, [r["Rejected"] for r in rows], marker="o", label="Rejected")
+    ax.set_title("Month-to-Month Production Comparison")
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Quantity")
+    ax.tick_params(axis="x", rotation=45)
+    ax.legend()
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=160)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _machine_trend_chart(aggregate: Dict) -> BytesIO:
+    rows = aggregate.get("machine_trend_rows", [])
+    fig, ax = plt.subplots(figsize=(11, 5.4))
+    machines = sorted({r["Machine"] for r in rows}, key=str.lower)
+    months = [r["Month"] for r in aggregate.get("monthly_rows", [])]
+    for machine in machines:
+        machine_rows = [r for r in rows if r["Machine"] == machine]
+        values_by_month = {r["Month"]: r["Accepted"] for r in machine_rows}
+        ax.plot(months, [values_by_month.get(month, 0) for month in months], marker="o", label=machine)
+    ax.set_title("Machine Accepted Production Trend by Month")
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Accepted Quantity")
+    ax.tick_params(axis="x", rotation=45)
+    if machines:
+        ax.legend(fontsize=8, ncol=2)
     fig.tight_layout()
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=160)
@@ -230,6 +332,29 @@ def _add_aggregate_table(pdf: FPDF, title: str, rows: List[Dict], first_col: str
         pdf.ln()
 
 
+def _add_monthly_table(pdf: FPDF, rows: List[Dict]):
+    if not rows:
+        return
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 12, "Month-by-Month Comparison", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+    pdf.image(_monthly_comparison_chart({"monthly_rows": rows}), x=25, y=28, w=247)
+    pdf.set_y(130)
+    headers = ["Month", "Weeks", "Completed", "Rejected", "Accepted", "Reject %"]
+    widths = [60, 35, 45, 45, 45, 42]
+    pdf.set_font("Helvetica", "B", 8)
+    for header, width in zip(headers, widths):
+        pdf.cell(width, 8, header, border=1, align="C")
+    pdf.ln()
+    pdf.set_font("Helvetica", size=8)
+    for row in rows:
+        values = [row["Month"], row["Weeks Included"], row["Completed"], row["Rejected"], row["Accepted"], f"{row['Rejection Rate %']:.2f}%"]
+        for value, width in zip(values, widths):
+            pdf.cell(width, 8, str(value), border=1, align="C")
+        pdf.ln()
+
+
 def generate_period_pdf(aggregate: Dict, report_type: str) -> bytes:
     title = f"{report_type} Production Report"
     pdf = FPDF(orientation="L", format="A4")
@@ -239,14 +364,7 @@ def generate_period_pdf(aggregate: Dict, report_type: str) -> bytes:
     pdf.set_font("Helvetica", "B", 24)
     pdf.cell(0, 18, title, align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", size=14)
-    pdf.cell(
-        0,
-        10,
-        f"{aggregate['start_date'].strftime('%d/%m/%Y')} to {aggregate['end_date'].strftime('%d/%m/%Y')}",
-        align="C",
-        new_x="LMARGIN",
-        new_y="NEXT",
-    )
+    pdf.cell(0, 10, f"{aggregate['start_date'].strftime('%d/%m/%Y')} to {aggregate['end_date'].strftime('%d/%m/%Y')}", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(6)
     pdf.set_font("Helvetica", size=12)
     pdf.cell(0, 9, f"Weekly reports included: {aggregate['weeks_included']}", align="C", new_x="LMARGIN", new_y="NEXT")
@@ -262,12 +380,18 @@ def generate_period_pdf(aggregate: Dict, report_type: str) -> bytes:
         ("Accepted Total", aggregate["Accepted Total"]),
         ("Rejection Rate", f"{aggregate['Rejection Rate']:.2f}%"),
     ]
-    widths = [68, 68, 68, 68]
-    pdf.set_font("Helvetica", size=12)
-    for (label, value), width in zip(metrics, widths):
-        pdf.cell(width, 12, f"{label}: {value}", border=1, align="C")
+    for label, value in metrics:
+        pdf.cell(68, 12, f"{label}: {value}", border=1, align="C")
     pdf.ln(18)
     pdf.image(_weekly_trend_chart(aggregate), x=25, y=65, w=247)
+
+    if report_type.lower().startswith("annual") or len(aggregate.get("monthly_rows", [])) > 1:
+        _add_monthly_table(pdf, aggregate.get("monthly_rows", []))
+        if aggregate.get("machine_trend_rows"):
+            pdf.add_page()
+            pdf.set_font("Helvetica", "B", 18)
+            pdf.cell(0, 12, "Machine Performance Trends", align="C", new_x="LMARGIN", new_y="NEXT")
+            pdf.image(_machine_trend_chart(aggregate), x=20, y=30, w=257)
 
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 18)
@@ -281,14 +405,12 @@ def generate_period_pdf(aggregate: Dict, report_type: str) -> bytes:
     pdf.ln()
     pdf.set_font("Helvetica", size=9)
     for row in aggregate["weekly_rows"]:
-        values = [row[h] for h in headers]
-        for value, width in zip(values, widths):
+        for value, width in zip([row[h] for h in headers], widths):
             pdf.cell(width, 8, str(value), border=1, align="C")
         pdf.ln()
 
     _add_aggregate_table(pdf, "Production by Machine", aggregate["machine_rows"], "Machine")
     _add_aggregate_table(pdf, "Production by Product", aggregate["product_rows"], "Product")
-
     return bytes(pdf.output())
 
 
@@ -303,17 +425,14 @@ def generate_pdf(monday: date, day_data: Dict) -> bytes:
     pdf.cell(0, 18, "Weekly Production Report", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", size=14)
     pdf.cell(0, 10, f"{dates['Monday'].strftime('%d/%m/%Y')} to {dates['Saturday'].strftime('%d/%m/%Y')}", align="C", new_x="LMARGIN", new_y="NEXT")
-    chart = _summary_chart(summary)
-    pdf.image(chart, x=25, y=48, w=247)
+    pdf.image(_summary_chart(summary), x=25, y=48, w=247)
 
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 18)
     pdf.cell(0, 12, "Weekly Summary", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", size=13)
     pdf.ln(8)
-    col_w = 90
     for label in ["Completed Total", "Rejected Total", "Accepted Total"]:
-        pdf.cell(col_w, 12, f"{label}: {summary[label]}", border=1, align="C")
+        pdf.cell(90, 12, f"{label}: {summary[label]}", border=1, align="C")
     pdf.ln(18)
     pdf.image(_summary_chart(summary), x=25, y=62, w=247)
 
@@ -342,15 +461,7 @@ def generate_pdf(monday: date, day_data: Dict) -> bytes:
         pdf.set_font("Helvetica", size=8)
         for machine, raw in machines.items():
             item = normalise_machine_data(raw)
-            row = [
-                machine,
-                item["Product Name"],
-                item["Manufacturing Order"],
-                item["Operation Number"],
-                str(item["Completed Quantity"]),
-                str(item["Rejected Quantity"]),
-                str(item["Accepted Quantity"]),
-            ]
+            row = [machine, item["Product Name"], item["Manufacturing Order"], item["Operation Number"], str(item["Completed Quantity"]), str(item["Rejected Quantity"]), str(item["Accepted Quantity"])]
             for value, w in zip(row, widths):
                 pdf.cell(w, 8, _safe_cell_text(value, 24), border=1)
             pdf.ln()
