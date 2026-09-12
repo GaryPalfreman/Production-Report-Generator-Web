@@ -5,9 +5,12 @@ import streamlit as st
 
 from report_generator import (
     DAYS,
+    aggregate_weekly_reports,
     blank_week,
     generate_pdf,
+    generate_period_pdf,
     load_payload,
+    load_weekly_report,
     normalise_machine_data,
     save_payload,
     week_dates,
@@ -47,11 +50,11 @@ if "products" not in st.session_state:
     st.session_state.products = []
 
 st.title("Weekly Production Report Generator")
-st.caption("Enter production data by day and machine, review the week, then generate a downloadable PDF report.")
+st.caption("Enter production data by day and machine, review the week, generate a weekly PDF, or combine saved weeks into monthly and annual reports.")
 
 with st.sidebar:
     st.header("Saved data")
-    uploaded = st.file_uploader("Load saved weekly JSON", type=["json"])
+    uploaded = st.file_uploader("Load saved weekly JSON", type=["json"], key="single_week_upload")
     if uploaded is not None and st.button("Load saved week", use_container_width=True):
         try:
             monday, day_data, machines, products = load_payload(uploaded.getvalue())
@@ -95,8 +98,8 @@ with st.container(border=True):
     dates = week_dates(st.session_state.week_start)
     st.caption(f"Reporting period: {dates['Monday'].strftime('%d/%m/%Y')} - {dates['Saturday'].strftime('%d/%m/%Y')}")
 
-manager_tab, entry_tab, review_tab, report_tab = st.tabs(
-    ["Machines & Products", "Enter Production", "Final Review", "Generate Report"]
+manager_tab, entry_tab, review_tab, report_tab, history_tab = st.tabs(
+    ["Machines & Products", "Enter Production", "Final Review", "Generate Weekly Report", "Monthly / Annual Reports"]
 )
 
 with manager_tab:
@@ -269,5 +272,98 @@ with report_tab:
         except Exception as exc:
             st.error(f"Could not generate the PDF: {exc}")
 
+with history_tab:
+    st.subheader("Build a Monthly or One-Year Report")
+    st.write(
+        "Upload the weekly JSON files previously downloaded from this app. "
+        "The files are combined into one higher-level production report without changing the original weekly files."
+    )
+
+    report_type = st.radio(
+        "Report type",
+        ["Monthly", "One Year / Overall"],
+        horizontal=True,
+        help="Monthly accepts up to 5 weekly files. One Year / Overall accepts up to 52 weekly files.",
+    )
+    max_files = 5 if report_type == "Monthly" else 52
+    period_label = "Monthly" if report_type == "Monthly" else "Annual"
+
+    uploaded_weeks = st.file_uploader(
+        f"Upload weekly JSON files (maximum {max_files})",
+        type=["json"],
+        accept_multiple_files=True,
+        key=f"aggregate_upload_{max_files}",
+    )
+
+    if uploaded_weeks:
+        if len(uploaded_weeks) > max_files:
+            st.error(f"Too many files selected. {report_type} reports accept a maximum of {max_files} weekly JSON files.")
+        else:
+            reports = []
+            errors = []
+            for uploaded_week in uploaded_weeks:
+                try:
+                    reports.append(load_weekly_report(uploaded_week.getvalue(), uploaded_week.name))
+                except Exception as exc:
+                    errors.append(f"{uploaded_week.name}: {exc}")
+
+            if errors:
+                st.error("One or more files could not be loaded:\n\n" + "\n".join(f"- {item}" for item in errors))
+            elif reports:
+                try:
+                    aggregate = aggregate_weekly_reports(reports)
+                    st.success(
+                        f"Loaded {aggregate['weeks_included']} unique weekly report(s), covering "
+                        f"{aggregate['start_date'].strftime('%d/%m/%Y')} to {aggregate['end_date'].strftime('%d/%m/%Y')}."
+                    )
+
+                    a1, a2, a3, a4, a5 = st.columns(5)
+                    a1.metric("Weeks Included", aggregate["weeks_included"])
+                    a2.metric("Completed", f"{aggregate['Completed Total']:,}")
+                    a3.metric("Rejected", f"{aggregate['Rejected Total']:,}")
+                    a4.metric("Accepted", f"{aggregate['Accepted Total']:,}")
+                    a5.metric("Rejection Rate", f"{aggregate['Rejection Rate']:.2f}%")
+
+                    st.markdown("### Week-by-week summary")
+                    weekly_df = pd.DataFrame(aggregate["weekly_rows"])
+                    st.dataframe(weekly_df, hide_index=True, use_container_width=True)
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown("### Production by machine")
+                        machine_df = pd.DataFrame(aggregate["machine_rows"])
+                        if machine_df.empty:
+                            st.info("No machine data found in the selected reports.")
+                        else:
+                            st.dataframe(machine_df, hide_index=True, use_container_width=True)
+                    with c2:
+                        st.markdown("### Production by product")
+                        product_df = pd.DataFrame(aggregate["product_rows"])
+                        if product_df.empty:
+                            st.info("No product data found in the selected reports.")
+                        else:
+                            st.dataframe(product_df, hide_index=True, use_container_width=True)
+
+                    pdf_bytes = generate_period_pdf(aggregate, period_label)
+                    filename = (
+                        f"{period_label}_Production_Report_"
+                        f"{aggregate['start_date'].strftime('%d%m%Y')}_to_"
+                        f"{aggregate['end_date'].strftime('%d%m%Y')}.pdf"
+                    )
+                    st.download_button(
+                        f"Generate / Download {report_type} Production Report PDF",
+                        data=pdf_bytes,
+                        file_name=filename,
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                except Exception as exc:
+                    st.error(f"Could not build the combined report: {exc}")
+    else:
+        st.info(f"Upload between 1 and {max_files} saved weekly JSON files to create this report.")
+
 st.divider()
-st.caption("Weekly data is kept in the current browser session. Download the JSON file if you want to retain or transfer the week between sessions/devices.")
+st.caption(
+    "Weekly data is kept in the current browser session. Download the weekly JSON file to retain each week; "
+    "those saved files can later be combined into monthly and one-year reports."
+)
