@@ -1,4 +1,5 @@
 import json
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from typing import Dict, List, Tuple
@@ -48,6 +49,8 @@ def load_payload(raw: bytes | str) -> Tuple[date, Dict, List[str], List[str]]:
         raw = raw.decode("utf-8-sig")
     data = json.loads(raw)
     monday = datetime.strptime(data["week_start"], "%Y-%m-%d").date()
+    if monday.weekday() != 0:
+        raise ValueError("Saved week_start is not a Monday.")
     day_data = data.get("day_data") or blank_week(monday)
     machines = list(data.get("machines", []))
     products = list(data.get("products", []))
@@ -66,6 +69,86 @@ def weekly_summary(day_data: Dict) -> Dict[str, int]:
         "Completed Total": completed,
         "Rejected Total": rejected,
         "Accepted Total": accepted,
+    }
+
+
+def load_weekly_report(raw: bytes | str, filename: str = "") -> Dict:
+    monday, day_data, machines, products = load_payload(raw)
+    return {
+        "filename": filename,
+        "week_start": monday,
+        "week_end": monday + timedelta(days=5),
+        "day_data": day_data,
+        "machines": machines,
+        "products": products,
+        "summary": weekly_summary(day_data),
+    }
+
+
+def aggregate_weekly_reports(reports: List[Dict]) -> Dict:
+    if not reports:
+        raise ValueError("At least one weekly report is required.")
+
+    sorted_reports = sorted(reports, key=lambda r: r["week_start"])
+    week_starts = [r["week_start"] for r in sorted_reports]
+    if len(week_starts) != len(set(week_starts)):
+        raise ValueError("Duplicate weekly reports detected. Each week can only be included once.")
+
+    completed = rejected = accepted = 0
+    machine_totals = defaultdict(lambda: {"Completed": 0, "Rejected": 0, "Accepted": 0})
+    product_totals = defaultdict(lambda: {"Completed": 0, "Rejected": 0, "Accepted": 0})
+    weekly_rows = []
+
+    for report in sorted_reports:
+        summary = report["summary"]
+        completed += summary["Completed Total"]
+        rejected += summary["Rejected Total"]
+        accepted += summary["Accepted Total"]
+        weekly_rows.append({
+            "Week Starting": report["week_start"].isoformat(),
+            "Week Ending": report["week_end"].isoformat(),
+            "Completed": summary["Completed Total"],
+            "Rejected": summary["Rejected Total"],
+            "Accepted": summary["Accepted Total"],
+        })
+
+        for day in DAYS:
+            machines = report["day_data"].get(day, {}).get("machines", {})
+            for machine, raw in machines.items():
+                item = normalise_machine_data(raw)
+                mt = machine_totals[machine]
+                mt["Completed"] += item["Completed Quantity"]
+                mt["Rejected"] += item["Rejected Quantity"]
+                mt["Accepted"] += item["Accepted Quantity"]
+
+                product = item["Product Name"] or "Unspecified"
+                pt = product_totals[product]
+                pt["Completed"] += item["Completed Quantity"]
+                pt["Rejected"] += item["Rejected Quantity"]
+                pt["Accepted"] += item["Accepted Quantity"]
+
+    machine_rows = [
+        {"Machine": name, **values}
+        for name, values in sorted(machine_totals.items(), key=lambda x: x[0].lower())
+    ]
+    product_rows = [
+        {"Product": name, **values}
+        for name, values in sorted(product_totals.items(), key=lambda x: x[0].lower())
+    ]
+
+    rejection_rate = (rejected / completed * 100) if completed else 0.0
+    return {
+        "reports": sorted_reports,
+        "start_date": sorted_reports[0]["week_start"],
+        "end_date": sorted_reports[-1]["week_end"],
+        "weeks_included": len(sorted_reports),
+        "Completed Total": completed,
+        "Rejected Total": rejected,
+        "Accepted Total": accepted,
+        "Rejection Rate": rejection_rate,
+        "weekly_rows": weekly_rows,
+        "machine_rows": machine_rows,
+        "product_rows": product_rows,
     }
 
 
@@ -96,6 +179,117 @@ def _daily_chart(machines: Dict[str, Dict]) -> BytesIO:
     names = list(machines.keys())
     values = [normalise_machine_data(machines[name])["Completed Quantity"] for name in names]
     return _chart_bytes(names, values, "Completed Quantity by Machine", "Completed Quantity")
+
+
+def _weekly_trend_chart(aggregate: Dict) -> BytesIO:
+    labels = [datetime.strptime(r["Week Starting"], "%Y-%m-%d").strftime("%d/%m") for r in aggregate["weekly_rows"]]
+    completed = [r["Completed"] for r in aggregate["weekly_rows"]]
+    accepted = [r["Accepted"] for r in aggregate["weekly_rows"]]
+    rejected = [r["Rejected"] for r in aggregate["weekly_rows"]]
+
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    ax.plot(labels, completed, marker="o", label="Completed")
+    ax.plot(labels, accepted, marker="o", label="Accepted")
+    ax.plot(labels, rejected, marker="o", label="Rejected")
+    ax.set_title("Weekly Production Trend")
+    ax.set_xlabel("Week Starting")
+    ax.set_ylabel("Quantity")
+    ax.tick_params(axis="x", rotation=45)
+    ax.legend()
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=160)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _safe_cell_text(value, max_len: int = 28) -> str:
+    text = str(value)
+    return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
+def _add_aggregate_table(pdf: FPDF, title: str, rows: List[Dict], first_col: str):
+    if not rows:
+        return
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 12, title, align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(5)
+    headers = [first_col, "Completed", "Rejected", "Accepted"]
+    widths = [120, 50, 50, 50]
+    pdf.set_font("Helvetica", "B", 9)
+    for header, width in zip(headers, widths):
+        pdf.cell(width, 8, header, border=1, align="C")
+    pdf.ln()
+    pdf.set_font("Helvetica", size=9)
+    for row in rows:
+        values = [row[first_col], row["Completed"], row["Rejected"], row["Accepted"]]
+        for value, width in zip(values, widths):
+            pdf.cell(width, 8, _safe_cell_text(value), border=1)
+        pdf.ln()
+
+
+def generate_period_pdf(aggregate: Dict, report_type: str) -> bytes:
+    title = f"{report_type} Production Report"
+    pdf = FPDF(orientation="L", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 24)
+    pdf.cell(0, 18, title, align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=14)
+    pdf.cell(
+        0,
+        10,
+        f"{aggregate['start_date'].strftime('%d/%m/%Y')} to {aggregate['end_date'].strftime('%d/%m/%Y')}",
+        align="C",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
+    pdf.ln(6)
+    pdf.set_font("Helvetica", size=12)
+    pdf.cell(0, 9, f"Weekly reports included: {aggregate['weeks_included']}", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.image(_weekly_trend_chart(aggregate), x=25, y=58, w=247)
+
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 12, "Overall Summary", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(7)
+    metrics = [
+        ("Completed Total", aggregate["Completed Total"]),
+        ("Rejected Total", aggregate["Rejected Total"]),
+        ("Accepted Total", aggregate["Accepted Total"]),
+        ("Rejection Rate", f"{aggregate['Rejection Rate']:.2f}%"),
+    ]
+    widths = [68, 68, 68, 68]
+    pdf.set_font("Helvetica", size=12)
+    for (label, value), width in zip(metrics, widths):
+        pdf.cell(width, 12, f"{label}: {value}", border=1, align="C")
+    pdf.ln(18)
+    pdf.image(_weekly_trend_chart(aggregate), x=25, y=65, w=247)
+
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 12, "Week-by-Week Summary", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(5)
+    headers = ["Week Starting", "Week Ending", "Completed", "Rejected", "Accepted"]
+    widths = [58, 58, 52, 52, 52]
+    pdf.set_font("Helvetica", "B", 9)
+    for header, width in zip(headers, widths):
+        pdf.cell(width, 8, header, border=1, align="C")
+    pdf.ln()
+    pdf.set_font("Helvetica", size=9)
+    for row in aggregate["weekly_rows"]:
+        values = [row[h] for h in headers]
+        for value, width in zip(values, widths):
+            pdf.cell(width, 8, str(value), border=1, align="C")
+        pdf.ln()
+
+    _add_aggregate_table(pdf, "Production by Machine", aggregate["machine_rows"], "Machine")
+    _add_aggregate_table(pdf, "Production by Product", aggregate["product_rows"], "Product")
+
+    return bytes(pdf.output())
 
 
 def generate_pdf(monday: date, day_data: Dict) -> bytes:
@@ -158,10 +352,7 @@ def generate_pdf(monday: date, day_data: Dict) -> bytes:
                 str(item["Accepted Quantity"]),
             ]
             for value, w in zip(row, widths):
-                text = str(value)
-                if len(text) > 24:
-                    text = text[:21] + "..."
-                pdf.cell(w, 8, text, border=1)
+                pdf.cell(w, 8, _safe_cell_text(value, 24), border=1)
             pdf.ln()
 
     return bytes(pdf.output())
